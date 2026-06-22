@@ -348,6 +348,16 @@ func (s *LLMProviderService) Create(orgUUID, createdBy string, req *api.LLMProvi
 		},
 	}
 
+	// When availableGateways is provided, create the first-time deployments for each
+	// gateway atomically with the provider/artifact insertion (see repository.Create).
+	if req.AvailableGateways != nil && len(*req.AvailableGateways) > 0 {
+		deployments, err := s.buildInitialDeployments(m, tpl.ID, orgUUID, *req.AvailableGateways)
+		if err != nil {
+			return nil, err
+		}
+		m.InitialDeployments = deployments
+	}
+
 	if err := s.repo.Create(m); err != nil {
 		if isSQLiteUniqueConstraint(err) {
 			return nil, constants.ErrLLMProviderExists
@@ -363,6 +373,71 @@ func (s *LLMProviderService) Create(orgUUID, createdBy string, req *api.LLMProvi
 		return nil, constants.ErrLLMProviderNotFound
 	}
 	return mapProviderModelToAPI(created, tpl.ID), nil
+}
+
+// buildInitialDeployments resolves each availableGateways entry to a gateway and builds
+// the first-time deployment artifacts to be persisted alongside the provider. The
+// returned deployments have ArtifactID/OrganizationID left unset; the repository fills
+// them in once the provider UUID is generated within the creation transaction.
+func (s *LLMProviderService) buildInitialDeployments(provider *model.LLMProvider, templateHandle, orgUUID string, gateways []api.AvailableGateway) ([]*model.Deployment, error) {
+	if s.gatewayRepo == nil {
+		return nil, fmt.Errorf("gateway repository is not configured")
+	}
+	deployments := make([]*model.Deployment, 0, len(gateways))
+	for _, ag := range gateways {
+		name := strings.TrimSpace(ag.Name)
+		if name == "" {
+			return nil, constants.ErrInvalidInput
+		}
+		gateway, err := s.gatewayRepo.GetByNameAndOrgID(name, orgUUID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve gateway %q: %w", name, err)
+		}
+		if gateway == nil {
+			return nil, constants.ErrGatewayNotFound
+		}
+
+		content, err := buildLLMProviderDeploymentContent(provider, templateHandle, availableGatewayVHost(ag))
+		if err != nil {
+			return nil, err
+		}
+
+		deployed := model.DeploymentStatusDeployed
+		deployments = append(deployments, &model.Deployment{
+			Name:      provider.Name,
+			GatewayID: gateway.ID,
+			Content:   content,
+			Status:    &deployed,
+		})
+	}
+	return deployments, nil
+}
+
+// availableGatewayVHost returns the optional per-gateway vhost override from the
+// configurations map, or "" when it is absent or not a string.
+func availableGatewayVHost(ag api.AvailableGateway) string {
+	if ag.Configurations == nil {
+		return ""
+	}
+	if v, ok := (*ag.Configurations)["vhost"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// buildLLMProviderDeploymentContent renders the deployment YAML for the provider,
+// applying an optional per-gateway vhost override without mutating the source provider.
+func buildLLMProviderDeploymentContent(provider *model.LLMProvider, templateHandle, vhostOverride string) ([]byte, error) {
+	p := *provider
+	if vhostOverride != "" {
+		v := vhostOverride
+		p.Configuration.VHost = &v
+	}
+	providerYaml, err := generateLLMProviderDeploymentYAML(&p, templateHandle)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate deployment content: %w", err)
+	}
+	return []byte(providerYaml), nil
 }
 
 func (s *LLMProviderService) List(orgUUID string, limit, offset int) (*api.LLMProviderListResponse, error) {

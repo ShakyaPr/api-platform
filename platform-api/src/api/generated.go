@@ -1634,6 +1634,15 @@ type LLMPolicyPath struct {
 // LLMPolicyPathMethods defines model for LLMPolicyPath.Methods.
 type LLMPolicyPathMethods string
 
+// AvailableGateway defines model for AvailableGateway.
+type AvailableGateway struct {
+	// Configurations Per-gateway configuration overrides for this LLM provider. Additional gateway-specific fields beyond those listed here are allowed.
+	Configurations *map[string]interface{} `json:"configurations,omitempty" yaml:"configurations,omitempty"`
+
+	// Name Name of the gateway this LLM provider can be deployed to
+	Name string `binding:"required" json:"name" yaml:"name"`
+}
+
 // LLMProvider defines model for LLMProvider.
 type LLMProvider struct {
 	AccessControl LLMAccessControl `json:"accessControl" yaml:"accessControl"`
@@ -1685,6 +1694,8 @@ type LLMProvider struct {
 
 	// Vhost Virtual host name used for routing. Supports standard domain names, subdomains, or wildcard domains. Must follow RFC-compliant hostname rules. Wildcards are only allowed in the left-most label (e.g., *.example.com).
 	Vhost *string `json:"vhost,omitempty" yaml:"vhost,omitempty"`
+
+	AvailableGateways *[]AvailableGateway `json:"availableGateways,omitempty" yaml:"availableGateways,omitempty"`
 }
 
 // LLMProviderAPIKeyListResponse defines model for LLMProviderAPIKeyListResponse.

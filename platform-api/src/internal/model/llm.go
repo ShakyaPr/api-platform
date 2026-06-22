@@ -139,22 +139,22 @@ type LLMProviderTemplateResourceMappings struct {
 }
 
 type LLMProviderTemplate struct {
-	UUID             string                       `json:"uuid" db:"uuid"`
-	OrganizationUUID string                       `json:"organizationId" db:"organization_uuid"`
-	ID               string                       `json:"id" db:"handle"`
-	Name             string                       `json:"name" db:"name"`
-	Description      string                       `json:"description,omitempty" db:"description"`
-	CreatedBy        string                       `json:"createdBy,omitempty" db:"created_by"`
-	Metadata         *LLMProviderTemplateMetadata `json:"metadata,omitempty" db:"-"`
-	PromptTokens     *ExtractionIdentifier        `json:"promptTokens,omitempty" db:"-"`
-	CompletionTokens *ExtractionIdentifier        `json:"completionTokens,omitempty" db:"-"`
-	TotalTokens      *ExtractionIdentifier        `json:"totalTokens,omitempty" db:"-"`
-	RemainingTokens  *ExtractionIdentifier        `json:"remainingTokens,omitempty" db:"-"`
-	RequestModel     *ExtractionIdentifier        `json:"requestModel,omitempty" db:"-"`
-	ResponseModel    *ExtractionIdentifier        `json:"responseModel,omitempty" db:"-"`
+	UUID             string                               `json:"uuid" db:"uuid"`
+	OrganizationUUID string                               `json:"organizationId" db:"organization_uuid"`
+	ID               string                               `json:"id" db:"handle"`
+	Name             string                               `json:"name" db:"name"`
+	Description      string                               `json:"description,omitempty" db:"description"`
+	CreatedBy        string                               `json:"createdBy,omitempty" db:"created_by"`
+	Metadata         *LLMProviderTemplateMetadata         `json:"metadata,omitempty" db:"-"`
+	PromptTokens     *ExtractionIdentifier                `json:"promptTokens,omitempty" db:"-"`
+	CompletionTokens *ExtractionIdentifier                `json:"completionTokens,omitempty" db:"-"`
+	TotalTokens      *ExtractionIdentifier                `json:"totalTokens,omitempty" db:"-"`
+	RemainingTokens  *ExtractionIdentifier                `json:"remainingTokens,omitempty" db:"-"`
+	RequestModel     *ExtractionIdentifier                `json:"requestModel,omitempty" db:"-"`
+	ResponseModel    *ExtractionIdentifier                `json:"responseModel,omitempty" db:"-"`
 	ResourceMappings *LLMProviderTemplateResourceMappings `json:"resourceMappings,omitempty" db:"-"`
-	CreatedAt        time.Time                    `json:"createdAt" db:"created_at"`
-	UpdatedAt        time.Time                    `json:"updatedAt" db:"updated_at"`
+	CreatedAt        time.Time                            `json:"createdAt" db:"created_at"`
+	UpdatedAt        time.Time                            `json:"updatedAt" db:"updated_at"`
 }
 
 // LLMProvider represents an LLM provider entity
@@ -173,6 +173,11 @@ type LLMProvider struct {
 	CreatedAt        time.Time          `json:"createdAt" db:"created_at"`
 	UpdatedAt        time.Time          `json:"updatedAt" db:"updated_at"`
 	Configuration    LLMProviderConfig  `json:"configuration" db:"configuration"`
+
+	// InitialDeployments carries first-time deployments (derived from availableGateways
+	// in the create request) so the repository can persist them within the same
+	// transaction as the artifact/provider insertion. Not stored on the llm_providers row.
+	InitialDeployments []*Deployment `json:"-" db:"-"`
 }
 
 type LLMProviderConfig struct {

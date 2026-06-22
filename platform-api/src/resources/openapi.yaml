@@ -10103,6 +10103,21 @@ components:
             $ref: "#/components/schemas/LLMPolicy"
         security:
           $ref: '#/components/schemas/SecurityConfig'
+        availableGateways:
+          type: array
+          description: >
+            Optional list of gateways this LLM provider can be deployed to, along with
+            per-gateway configuration overrides. This field is optional; omitting it does
+            not change existing behaviour.
+          items:
+            $ref: '#/components/schemas/AvailableGateway'
+          example:
+            - name: prod-eu
+              configurations:
+                vhost: prod-eu.platform.local
+            - name: prod-us
+              configurations:
+                vhost: prod-us.platform.local
         createdAt:
           type: string
           format: date-time
@@ -10115,6 +10130,27 @@ components:
           description: Timestamp when the resource was last updated
           readOnly: true
           example: "2023-10-12T10:30:00Z"
+
+    AvailableGateway:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: Name of the gateway this LLM provider can be deployed to
+          example: prod-eu
+        configurations:
+          type: object
+          description: >
+            Per-gateway configuration overrides for this LLM artifact. Additional
+            gateway-specific fields beyond those listed here are allowed.
+          additionalProperties: true
+          properties:
+            vhost:
+              type: string
+              description: Virtual host used when routing this LLM provider on the gateway
+              example: prod-eu.platform.local
 
     LLMProviderListItem:
       type: object
