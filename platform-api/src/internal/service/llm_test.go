@@ -1090,7 +1090,7 @@ func TestLLMProviderServiceCreateRejectsMultipleModelProvidersForNativeTemplate(
 			return &model.LLMProviderTemplate{UUID: "tpl-openai", ID: "openai", CreatedAt: now, UpdatedAt: now}, nil
 		},
 	}
-	service := NewLLMProviderService(providerRepo, templateRepo, nil, nil, nil, nil, nil, slog.Default())
+	service := NewLLMProviderService(providerRepo, templateRepo, nil, nil, nil, nil, nil, nil, slog.Default())
 
 	request := validProviderRequest("openai")
 	request.ModelProviders = &[]api.LLMModelProvider{
@@ -1126,7 +1126,7 @@ func TestLLMProviderServiceCreateAllowsAggregatorTemplate(t *testing.T) {
 		},
 	}
 	orgRepo := &mockOrganizationRepo{org: &model.Organization{ID: "org-1"}}
-	service := NewLLMProviderService(providerRepo, templateRepo, orgRepo, nil, nil, nil, nil, slog.Default())
+	service := NewLLMProviderService(providerRepo, templateRepo, orgRepo, nil, nil, nil, nil, nil, slog.Default())
 
 	request := validProviderRequest("awsbedrock")
 	request.ModelProviders = &[]api.LLMModelProvider{
@@ -1153,7 +1153,7 @@ func TestLLMProviderServiceCreateReturnsConflictForDuplicateHandle(t *testing.T)
 			return &model.LLMProviderTemplate{UUID: "tpl-openai", ID: "openai"}, nil
 		},
 	}
-	service := NewLLMProviderService(providerRepo, templateRepo, nil, nil, nil, nil, nil, slog.Default())
+	service := NewLLMProviderService(providerRepo, templateRepo, nil, nil, nil, nil, nil, nil, slog.Default())
 
 	_, err := service.Create("org-1", "alice", validProviderRequest("openai"))
 	if err != constants.ErrLLMProviderExists {
@@ -1195,7 +1195,7 @@ func TestLLMProviderServiceUpdatePreservesUpstreamAuthValue(t *testing.T) {
 			return &model.LLMProviderTemplate{UUID: "tpl-openai", ID: "openai"}, nil
 		},
 	}
-	service := NewLLMProviderService(providerRepo, templateRepo, nil, nil, nil, nil, nil, slog.Default())
+	service := NewLLMProviderService(providerRepo, templateRepo, nil, nil, nil, nil, nil, nil, slog.Default())
 
 	request := validProviderRequest("openai")
 	request.Name = "Updated Provider"

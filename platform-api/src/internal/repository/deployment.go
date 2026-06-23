@@ -53,6 +53,22 @@ func (r *DeploymentRepo) CreateWithLimitEnforcement(deployment *model.Deployment
 	}
 	defer tx.Rollback()
 
+	if err := upsertDeploymentWithLimitTx(r.db, tx, deployment, hardLimit); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// upsertDeploymentWithLimitTx creates a new immutable deployment revision and upserts its
+// deployment_status row within the provided transaction. When hardLimit > 0 and the
+// per-gateway revision count has reached hardLimit, it first prunes the oldest ARCHIVED
+// revisions (using row-level locks to reduce races). Passing hardLimit <= 0 skips pruning
+// entirely — used for first-time deployments of a brand-new artifact that has no prior
+// revisions. This is the shared core behind CreateWithLimitEnforcement and the LLM provider
+// create/update transactions, so the same status-tracking semantics apply regardless of
+// which caller owns the transaction.
+func upsertDeploymentWithLimitTx(db *database.DB, tx *sql.Tx, deployment *model.Deployment, hardLimit int) error {
 	// Generate UUID for deployment if not already set
 	if deployment.DeploymentID == "" {
 		deploymentID, err := utils.GenerateUUID()
@@ -79,13 +95,13 @@ func (r *DeploymentRepo) CreateWithLimitEnforcement(deployment *model.Deployment
 		FROM deployments
 		WHERE artifact_uuid = ? AND gateway_uuid = ? AND organization_uuid = ?
 	`
-	err = tx.QueryRow(r.db.Rebind(countQuery), deployment.ArtifactID, deployment.GatewayID, deployment.OrganizationID).Scan(&count)
-	if err != nil {
+	if err := tx.QueryRow(db.Rebind(countQuery), deployment.ArtifactID, deployment.GatewayID, deployment.OrganizationID).Scan(&count); err != nil {
 		return err
 	}
 
-	// 2. If at/over hard limit, delete oldest 5 ARCHIVED deployments
-	if count >= hardLimit {
+	// 2. If at/over hard limit, delete oldest 5 ARCHIVED deployments.
+	//    Skipped when hardLimit <= 0 (first-time deployments have nothing to prune).
+	if hardLimit > 0 && count >= hardLimit {
 		// Get oldest 5 ARCHIVED deployment IDs (LEFT JOIN WHERE status IS NULL)
 		getOldestQuery := `
 			SELECT d.deployment_id
@@ -100,7 +116,7 @@ func (r *DeploymentRepo) CreateWithLimitEnforcement(deployment *model.Deployment
 			` + r.db.FetchFirstClause(5) + `
 		`
 
-		rows, err := tx.Query(r.db.Rebind(getOldestQuery), deployment.ArtifactID, deployment.GatewayID, deployment.OrganizationID)
+		rows, err := tx.Query(db.Rebind(getOldestQuery), deployment.ArtifactID, deployment.GatewayID, deployment.OrganizationID)
 		if err != nil {
 			return err
 		}
@@ -124,8 +140,7 @@ func (r *DeploymentRepo) CreateWithLimitEnforcement(deployment *model.Deployment
 		// Delete one-by-one to use row-level locks (prevents over-deletion in concurrent scenarios)
 		deleteQuery := `DELETE FROM deployments WHERE deployment_id = ?`
 		for _, id := range idsToDelete {
-			_, err := tx.Exec(r.db.Rebind(deleteQuery), id)
-			if err != nil {
+			if _, err := tx.Exec(db.Rebind(deleteQuery), id); err != nil {
 				return err
 			}
 		}
@@ -151,13 +166,28 @@ func (r *DeploymentRepo) CreateWithLimitEnforcement(deployment *model.Deployment
 		metadataJSON = string(metadataBytes)
 	}
 
-	_, err = tx.Exec(r.db.Rebind(deploymentQuery), deployment.DeploymentID, deployment.Name, deployment.ArtifactID, deployment.OrganizationID,
-		deployment.GatewayID, baseDeploymentID, deployment.Content, metadataJSON, deployment.CreatedAt)
-	if err != nil {
+	if _, err := tx.Exec(db.Rebind(deploymentQuery), deployment.DeploymentID, deployment.Name, deployment.ArtifactID, deployment.OrganizationID,
+		deployment.GatewayID, baseDeploymentID, deployment.Content, metadataJSON, deployment.CreatedAt); err != nil {
 		return err
 	}
 
 	// 4. Insert or update deployment status (UPSERT)
+	var statusQuery string
+	if db.Driver() == "postgres" || db.Driver() == "postgresql" {
+		statusQuery = `
+			INSERT INTO deployment_status (artifact_uuid, organization_uuid, gateway_uuid, deployment_id, status, status_desired, performed_at, status_reason, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+			ON CONFLICT (artifact_uuid, organization_uuid, gateway_uuid)
+			DO UPDATE SET deployment_id = EXCLUDED.deployment_id, status = EXCLUDED.status,
+			             status_desired = EXCLUDED.status_desired, performed_at = EXCLUDED.performed_at,
+			             status_reason = NULL, updated_at = EXCLUDED.updated_at
+		`
+	} else {
+		statusQuery = `
+			REPLACE INTO deployment_status (artifact_uuid, organization_uuid, gateway_uuid, deployment_id, status, status_desired, performed_at, status_reason, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+		`
+	}
 	statusQuery := r.db.BuildUpsertQuery(
 		"deployment_status",
 		[]string{"artifact_uuid", "organization_uuid", "gateway_uuid", "deployment_id", "status", "status_desired", "performed_at", "status_reason", "updated_at"},
@@ -165,8 +195,8 @@ func (r *DeploymentRepo) CreateWithLimitEnforcement(deployment *model.Deployment
 		[]string{"deployment_id", "status", "status_desired", "performed_at", "status_reason=NULL", "updated_at"},
 	)
 
-	// Status and UpdatedAt are guaranteed to be non-nil by initialization at function start
-	_, err = tx.Exec(r.db.Rebind(statusQuery),
+	// Status and UpdatedAt are guaranteed to be non-nil by initialization above
+	if _, err := tx.Exec(db.Rebind(statusQuery),
 		deployment.ArtifactID,
 		deployment.OrganizationID,
 		deployment.GatewayID,
@@ -176,12 +206,11 @@ func (r *DeploymentRepo) CreateWithLimitEnforcement(deployment *model.Deployment
 		*deployment.UpdatedAt,
 		nil,
 		*deployment.UpdatedAt,
-	)
-	if err != nil {
+	); err != nil {
 		return err
 	}
 
-	return tx.Commit()
+	return nil
 }
 
 // GetWithContent retrieves a deployment including its content (for rollback/base deployment scenarios)

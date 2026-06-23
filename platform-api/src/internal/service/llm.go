@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"platform-api/src/api"
+	"platform-api/src/config"
 	"platform-api/src/internal/constants"
 	"platform-api/src/internal/model"
 	"platform-api/src/internal/repository"
@@ -49,6 +50,7 @@ type LLMProviderService struct {
 	deploymentRepo       repository.DeploymentRepository
 	gatewayRepo          repository.GatewayRepository
 	gatewayEventsService *GatewayEventsService
+	cfg                  *config.Server
 	slogger              *slog.Logger
 }
 
@@ -74,6 +76,7 @@ func NewLLMProviderService(
 	deploymentRepo repository.DeploymentRepository,
 	gatewayRepo repository.GatewayRepository,
 	gatewayEventsService *GatewayEventsService,
+	cfg *config.Server,
 	slogger *slog.Logger,
 ) *LLMProviderService {
 	return &LLMProviderService{
@@ -84,6 +87,7 @@ func NewLLMProviderService(
 		deploymentRepo:       deploymentRepo,
 		gatewayRepo:          gatewayRepo,
 		gatewayEventsService: gatewayEventsService,
+		cfg:                  cfg,
 		slogger:              slogger,
 	}
 }
@@ -350,12 +354,13 @@ func (s *LLMProviderService) Create(orgUUID, createdBy string, req *api.LLMProvi
 
 	// When availableGateways is provided, create the first-time deployments for each
 	// gateway atomically with the provider/artifact insertion (see repository.Create).
+	// DeploymentHardLimit stays 0: a brand-new artifact has no prior revisions to prune.
 	if req.AvailableGateways != nil && len(*req.AvailableGateways) > 0 {
-		deployments, err := s.buildInitialDeployments(m, tpl.ID, orgUUID, *req.AvailableGateways)
+		deployments, err := s.buildAvailableGatewayDeployments(m, tpl.ID, orgUUID, *req.AvailableGateways)
 		if err != nil {
 			return nil, err
 		}
-		m.InitialDeployments = deployments
+		m.GatewayDeployments = deployments
 	}
 
 	if err := s.repo.Create(m); err != nil {
@@ -375,11 +380,11 @@ func (s *LLMProviderService) Create(orgUUID, createdBy string, req *api.LLMProvi
 	return mapProviderModelToAPI(created, tpl.ID), nil
 }
 
-// buildInitialDeployments resolves each availableGateways entry to a gateway and builds
-// the first-time deployment artifacts to be persisted alongside the provider. The
-// returned deployments have ArtifactID/OrganizationID left unset; the repository fills
-// them in once the provider UUID is generated within the creation transaction.
-func (s *LLMProviderService) buildInitialDeployments(provider *model.LLMProvider, templateHandle, orgUUID string, gateways []api.AvailableGateway) ([]*model.Deployment, error) {
+// buildAvailableGatewayDeployments resolves each availableGateways entry to a gateway and
+// builds the deployment artifacts to be persisted alongside the provider within the
+// create/update transaction. The returned deployments have ArtifactID/OrganizationID left
+// unset; the repository fills them in from the resolved provider UUID inside the transaction.
+func (s *LLMProviderService) buildAvailableGatewayDeployments(provider *model.LLMProvider, templateHandle, orgUUID string, gateways []api.AvailableGateway) ([]*model.Deployment, error) {
 	if s.gatewayRepo == nil {
 		return nil, fmt.Errorf("gateway repository is not configured")
 	}
@@ -403,11 +408,13 @@ func (s *LLMProviderService) buildInitialDeployments(provider *model.LLMProvider
 		}
 
 		deployed := model.DeploymentStatusDeployed
+		metadata := utils.MapValueOrEmpty(ag.Configurations)
 		deployments = append(deployments, &model.Deployment{
 			Name:      provider.Name,
 			GatewayID: gateway.ID,
 			Content:   content,
 			Status:    &deployed,
+			Metadata:  metadata,
 		})
 	}
 	return deployments, nil
@@ -438,6 +445,19 @@ func buildLLMProviderDeploymentContent(provider *model.LLMProvider, templateHand
 		return nil, fmt.Errorf("failed to generate deployment content: %w", err)
 	}
 	return []byte(providerYaml), nil
+}
+
+// deploymentHardLimit returns the per-gateway deployment-revision hard limit derived from
+// configuration (soft limit + buffer), matching the deployment service. It is used when the
+// update flow records new deployment revisions so the oldest ARCHIVED revisions are pruned.
+func (s *LLMProviderService) deploymentHardLimit() (int, error) {
+	if s.cfg == nil {
+		return 0, fmt.Errorf("server configuration is not available")
+	}
+	if s.cfg.Deployments.MaxPerAPIGateway < 1 {
+		return 0, fmt.Errorf("MaxPerAPIGateway limit config must be at least 1, got %d", s.cfg.Deployments.MaxPerAPIGateway)
+	}
+	return s.cfg.Deployments.MaxPerAPIGateway + constants.DeploymentLimitBuffer, nil
 }
 
 func (s *LLMProviderService) List(orgUUID string, limit, offset int) (*api.LLMProviderListResponse, error) {
@@ -579,6 +599,24 @@ func (s *LLMProviderService) Update(orgUUID, handle string, req *api.LLMProvider
 	// Preserve stored upstream auth credential only when auth object is provided with an empty value.
 	// If auth object is omitted, treat it as explicit removal and clear stored auth.
 	m.Configuration.Upstream = preserveUpstreamAuthValue(existing.Configuration.Upstream, m.Configuration.Upstream)
+
+	// When availableGateways is provided, record a new deployment revision per gateway and
+	// re-point deployment_status within the same transaction as the provider update. Unlike
+	// create, prior revisions may exist, so this is limit-enforced the same way deployment.go
+	// handles redeployments (oldest ARCHIVED revisions pruned). This only maintains the
+	// deployment state in platform-api; the actual gateway rollout is a separate step.
+	if req.AvailableGateways != nil && len(*req.AvailableGateways) > 0 {
+		hardLimit, err := s.deploymentHardLimit()
+		if err != nil {
+			return nil, err
+		}
+		deployments, err := s.buildAvailableGatewayDeployments(m, tpl.ID, orgUUID, *req.AvailableGateways)
+		if err != nil {
+			return nil, err
+		}
+		m.GatewayDeployments = deployments
+		m.DeploymentHardLimit = hardLimit
+	}
 
 	if err := s.repo.Update(m); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

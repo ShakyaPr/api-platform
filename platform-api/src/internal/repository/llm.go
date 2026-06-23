@@ -345,86 +345,19 @@ func (r *LLMProviderRepo) Create(p *model.LLMProvider) error {
 
 	// Persist any first-time deployments (from availableGateways) within the same
 	// transaction so a failure rolls back the provider, artifact, and deployments together.
-	for _, dep := range p.InitialDeployments {
+	// p.DeploymentHardLimit is 0 on create: a brand-new artifact has no prior revisions to prune.
+	for _, dep := range p.GatewayDeployments {
 		if dep == nil {
 			continue
 		}
 		dep.ArtifactID = p.UUID
 		dep.OrganizationID = p.OrganizationUUID
-		if err := r.insertInitialDeploymentTx(tx, dep); err != nil {
+		if err := upsertDeploymentWithLimitTx(r.db, tx, dep, p.DeploymentHardLimit); err != nil {
 			return fmt.Errorf("failed to create initial deployment: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return nil
-}
-
-// insertInitialDeploymentTx inserts a brand-new deployment artifact and upserts its
-// deployment_status row within the provided transaction. It is intended for first-time
-// deployments created alongside the artifact, so — unlike CreateWithLimitEnforcement —
-// it performs no archived-deployment cleanup or per-gateway limit enforcement.
-func (r *LLMProviderRepo) insertInitialDeploymentTx(tx *sql.Tx, deployment *model.Deployment) error {
-	if deployment.DeploymentID == "" {
-		deploymentID, err := utils.GenerateUUID()
-		if err != nil {
-			return fmt.Errorf("failed to generate deployment ID: %w", err)
-		}
-		deployment.DeploymentID = deploymentID
-	}
-	now := time.Now()
-	deployment.CreatedAt = now
-	if deployment.Status == nil {
-		deployed := model.DeploymentStatusDeployed
-		deployment.Status = &deployed
-	}
-	deployment.UpdatedAt = &now
-
-	var baseDeploymentID interface{}
-	if deployment.BaseDeploymentID != nil {
-		baseDeploymentID = *deployment.BaseDeploymentID
-	}
-
-	var metadataJSON string
-	if len(deployment.Metadata) > 0 {
-		metadataBytes, err := json.Marshal(deployment.Metadata)
-		if err != nil {
-			return fmt.Errorf("failed to marshal deployment metadata: %w", err)
-		}
-		metadataJSON = string(metadataBytes)
-	}
-
-	deploymentQuery := `
-		INSERT INTO deployments (deployment_id, name, artifact_uuid, organization_uuid, gateway_uuid, base_deployment_id, content, metadata, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-	if _, err := tx.Exec(r.db.Rebind(deploymentQuery),
-		deployment.DeploymentID, deployment.Name, deployment.ArtifactID, deployment.OrganizationID,
-		deployment.GatewayID, baseDeploymentID, deployment.Content, metadataJSON, deployment.CreatedAt); err != nil {
-		return err
-	}
-
-	var statusQuery string
-	if r.db.Driver() == "postgres" || r.db.Driver() == "postgresql" {
-		statusQuery = `
-			INSERT INTO deployment_status (artifact_uuid, organization_uuid, gateway_uuid, deployment_id, status, status_desired, performed_at, status_reason, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
-			ON CONFLICT (artifact_uuid, organization_uuid, gateway_uuid)
-			DO UPDATE SET deployment_id = EXCLUDED.deployment_id, status = EXCLUDED.status,
-			             status_desired = EXCLUDED.status_desired, performed_at = EXCLUDED.performed_at,
-			             status_reason = NULL, updated_at = EXCLUDED.updated_at
-		`
-	} else {
-		statusQuery = `
-			REPLACE INTO deployment_status (artifact_uuid, organization_uuid, gateway_uuid, deployment_id, status, status_desired, performed_at, status_reason, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
-		`
-	}
-	if _, err := tx.Exec(r.db.Rebind(statusQuery),
-		deployment.ArtifactID, deployment.OrganizationID, deployment.GatewayID, deployment.DeploymentID,
-		*deployment.Status, string(*deployment.Status), now, now); err != nil {
 		return err
 	}
 	return nil
@@ -589,6 +522,21 @@ func (r *LLMProviderRepo) Update(p *model.LLMProvider) error {
 	if affected == 0 {
 		return sql.ErrNoRows
 	}
+
+	// Persist deployments (from availableGateways) within the same transaction so a failure
+	// rolls back the provider update and the deployment state together. Prior revisions may
+	// exist, so p.DeploymentHardLimit (> 0) drives pruning of the oldest ARCHIVED revisions.
+	for _, dep := range p.GatewayDeployments {
+		if dep == nil {
+			continue
+		}
+		dep.ArtifactID = providerUUID
+		dep.OrganizationID = p.OrganizationUUID
+		if err := upsertDeploymentWithLimitTx(r.db, tx, dep, p.DeploymentHardLimit); err != nil {
+			return fmt.Errorf("failed to upsert deployment: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return err
 	}

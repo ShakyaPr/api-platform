@@ -174,10 +174,17 @@ type LLMProvider struct {
 	UpdatedAt        time.Time          `json:"updatedAt" db:"updated_at"`
 	Configuration    LLMProviderConfig  `json:"configuration" db:"configuration"`
 
-	// InitialDeployments carries first-time deployments (derived from availableGateways
-	// in the create request) so the repository can persist them within the same
-	// transaction as the artifact/provider insertion. Not stored on the llm_providers row.
-	InitialDeployments []*Deployment `json:"-" db:"-"`
+	// GatewayDeployments carries the deployments (derived from availableGateways in a
+	// create/update request) that the repository persists within the same transaction as
+	// the artifact/provider write, so a failure rolls everything back. Not stored on the
+	// llm_providers row.
+	GatewayDeployments []*Deployment `json:"-" db:"-"`
+
+	// DeploymentHardLimit bounds the per-gateway revision count when persisting
+	// GatewayDeployments: when > 0 the repository prunes the oldest ARCHIVED revisions
+	// before inserting (used on update, where prior revisions may exist); 0 disables
+	// pruning (used on create of a brand-new artifact). Not stored on the llm_providers row.
+	DeploymentHardLimit int `json:"-" db:"-"`
 }
 
 type LLMProviderConfig struct {
